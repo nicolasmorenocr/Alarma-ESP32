@@ -1,9 +1,24 @@
+//PINES Y HARDWARE
+//  PANTALLA
+//    CS 15
+//    RST 4
+//    SCK 18
+//    DC 2
+//    SDA 23
+//  BOTONES 
+//    UP 19
+//    DOWN 21
+//    SELECT 25
 //LIBRERIAS
+
 #include <TFT_eSPI.h>
 #include <WiFi.h>
 #include "time.h"
+#include "BluetoothSerial.h"
+
 //CONSTANTES
-#define NAV_COOLDOWN_MS 300
+
+#define NAV_COOLDOWN_MS 100
 #define DEBOUNCE_MS     200
 #define SCREEN_WIDTH 320
 #define BTNUP_PIN 19
@@ -14,26 +29,35 @@ const char* password = "pipitariano";
 const char* ntpServer = "pool.ntp.org";
 const long  gmtOffset_sec = -5 * 3600; // -18000 seconds
 const int   daylightOffset_sec = 0;    // No daylight saving time
+
 //ENUMERACIONES 
+//ESTADOS DEL PROGRAMA
 typedef enum : uint8_t {
   STATE_MENU,
   STATE_WF,
   STATE_BT,
-  STATE_ALARMCONF
+  STATE_ALARMCONF,
 } ProgrammState;
+//PETICIONES DE RENDERIZADO PARA LA TASK QUE DIBUJA
 
 typedef enum : uint8_t {
   RENDER_MENU,
-  RENDER_WIFI
+  RENDER_WIFI_CONECTANDO,
+  RENDER_WIFI_CONECTADO,
+  RENDER_CONECTANDO_BT
 } RenderCommand;
+
+// ESTRUCTURA QUE TIENE LAS VARIABLES QUE DEFINEN ESTADOS DE DIFERENTES PARTES DEL PROGRAMA
 
 typedef struct {
   ProgrammState currentState;
   int menuSelection;
   bool Bluethoot;
   bool wifi;
+  bool Conectando; 
   int hora;
   int minuto;
+  int LastTiempotranscurrido;
 } AppData;
 
 //INICIACION APP
@@ -52,7 +76,7 @@ void setup() {
   tft.init();
   tft.setRotation(1); 
 
-//valores iniciales
+//VALORES INICIALES
   gd.currentState = STATE_MENU;
   gd.menuSelection = 0;
   gd.wifi = false;
@@ -69,7 +93,7 @@ void setup() {
   pinMode(BTNDOWN_PIN, INPUT_PULLUP);
   pinMode(BTNSEL_PIN, INPUT_PULLUP);
 
-  // 🔥 render inicial
+  // RENDER INICIAL
   sendRenderCommand(RENDER_MENU);
 }
 
@@ -100,7 +124,7 @@ void logicTask(void *p) {
 void drawTask(void *p) {
   struct tm timeinfo;
   RenderCommand cmd;
-  static int lastSel = -1;  // 🔥 anti-flicker
+  static int lastSel = -1; 
 
   for (;;) {
     if (xQueueReceive(renderQueue, &cmd, portMAX_DELAY)) {
@@ -118,7 +142,6 @@ void drawTask(void *p) {
           xSemaphoreGive(stateMutex);
         }
 
-        // 🔥 SOLO dibuja si cambió
         if (sel != lastSel || horaN != gd.hora || minutoN != gd.minuto ) {
           gd.hora = horaN;
           gd.minuto = minutoN; 
@@ -126,8 +149,11 @@ void drawTask(void *p) {
           lastSel = sel;
         }
       }
-      else if (cmd == RENDER_WIFI){
-        DrawWifi();
+      else if (cmd == RENDER_WIFI_CONECTANDO){
+        DrawWifi(0);
+      }
+      else if (cmd == RENDER_WIFI_CONECTADO){
+        DrawWifi(1);
       }
     }
   }
@@ -169,9 +195,18 @@ void DrawMenu(int sel){
   }
 }
 
-void DrawWifi(){
-  tft.fillScreen(TFT_WHITE);
-  tft.drawString("Chamo",10,46,4);
+void DrawWifi(int modo){
+  //CONECTANDO A WIFI 
+  if(modo == 0){
+    tft.fillScreen(TFT_WHITE);
+    tft.drawString("Conectando",10,46,4);
+  }
+  //CONEXION ESTABLECIDA
+  else{
+    tft.fillScreen(TFT_WHITE);
+    tft.drawString("Conectado con exito!",10,46,4);
+    tft.drawString("Regresando al menu",10,46,4);
+  }
 }
 
 
@@ -183,9 +218,10 @@ void handleMenu() {
   int horaN;
   int minutoN;
 
-  if (getLocalTime(&timeinfo)) {
+  if (Tiempotranscurrido() > 60000  && getLocalTime(&timeinfo)) {
     horaN = timeinfo.tm_hour;
     minutoN = timeinfo.tm_min;
+    gd.LastTiempotranscurrido = millis();
   }
   if (navLocked && (millis() - navLockTime > NAV_COOLDOWN_MS))
     navLocked = false;
@@ -193,30 +229,34 @@ void handleMenu() {
   bool changed = false;
   if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE ) {
 
-        if(horaN != gd.hora || minutoN != gd.minuto){
-          changed = true;
-        }
-        xSemaphoreGive(stateMutex);
+    if(horaN != gd.hora || minutoN != gd.minuto){
+      changed = true;
+      }
+    xSemaphoreGive(stateMutex);
   }
-  if (!navLocked && (digitalRead(BTNUP_PIN) == HIGH || digitalRead(BTNDOWN_PIN) == HIGH)) {
-    navLocked   = true;
+
+  if(!navLocked ){
+    navLocked = true;
     navLockTime = millis();
 
-    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE ) {
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(1000)) == pdTRUE ) {
       
-
+      
 
       if(!digitalRead(BTNUP_PIN) && (gd.menuSelection < 2)){
         gd.menuSelection += 1;
+        Serial.println("arriba");
         changed = true;
       }
 
-      if(!digitalRead(BTNDOWN_PIN) && (gd.menuSelection > 0)){
+      else if(!digitalRead(BTNDOWN_PIN) && (gd.menuSelection > 0)){
+        Serial.println("Abajo");
         gd.menuSelection += -1;
         changed = true;
       }
       
-      if(!digitalRead(BTNSEL_PIN)){
+      else if(!digitalRead(BTNSEL_PIN)){
+        Serial.println("select");
         switch(gd.menuSelection){
           case 0:
           gd.currentState = STATE_ALARMCONF;
@@ -239,57 +279,71 @@ void handleMenu() {
     sendRenderCommand(RENDER_MENU);
   }
 
-  vTaskDelay(pdMS_TO_TICKS(50));
 }
+
 void handleWifi(){
 
-static bool FirstTime = true;
-static bool Conectando = false;
-static bool yaConectado = false; 
+  static bool FirstTime = true;
 
-if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+
+
+  if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
       //  ───── Comprobar si la conexion ya esta establecida ─────
       if(gd.wifi == true){
-  
-        
-        Serial.println("por Aqui");
-        sendRenderCommand(RENDER_MENU);
+        sendRenderCommand(RENDER_WIFI_CONECTADO);
+        configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+        struct tm timeinfo;
+        vTaskDelay(pdMS_TO_TICKS(1000));
         gd.currentState = STATE_MENU;
         xSemaphoreGive(stateMutex);
+        sendRenderCommand(RENDER_MENU);
+        
       }
       // ───── iniciar conexión ─────
-      if(gd.wifi == false && FirstTime == true && Conectando == false){
-        sendRenderCommand(RENDER_WIFI);
+      else if(gd.wifi == false){
+        sendRenderCommand(RENDER_WIFI_CONECTANDO);
         WiFi.begin(ssid, password);
-        Conectando = true;
-        FirstTime = false;   
       }
 
       // ───── detectar conexión SOLO UNA VEZ ─────
-      if (WiFi.status() == WL_CONNECTED && !yaConectado) {
+      else if (WiFi.status() == WL_CONNECTED) {
         Serial.println("Conectado!");
-
-        Conectando = false;
         gd.wifi = true;
-        yaConectado = true;   // 🔥 evita repetir
-      }
-      if(gd.wifi == true){
-        configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-        struct tm timeinfo;
       }
 
   // ───── mientras conecta ─────
-      if(Conectando){
-        Serial.print(".");
-      }
 
-  xSemaphoreGive(stateMutex);
+    xSemaphoreGive(stateMutex);
   }
   if(gd.wifi == true){
-  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
   }
 }
+
+handleBluethoot(){  
+  if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE){
+   if(!gd.Bluethoot){
+     SerialBT.begin("ALARMADIBAR");
+     sendRenderCommand(RENDER_CONECTANDO_BT);
+   }
+   
+   else if(gd.Bluethoot){
+    sendRenderCommand(RENDER_CONECTANDO_BT);
+   }
+   
+
+
+  }
+  
+
+  }
 // ─────────────────────────────────────────────
 void sendRenderCommand(RenderCommand cmd) {
   xQueueSend(renderQueue, &cmd, 0);
+  }
+
+//utils
+int Tiempotranscurrido(){
+  int temp = millis() - gd.LastTiempotranscurrido;
+  return temp;
 }
