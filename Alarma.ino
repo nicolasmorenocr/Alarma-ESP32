@@ -8,20 +8,17 @@
 #include "time.h"
 #include "BluetoothSerial.h"
 #include <DFRobotDFPlayerMini.h>
+#include <Adafruit_NeoPixel.h>
 
 // ─── PINES ───────────────────────────────────────────────────
+#define BUZZER_PIN    33
+#define NEO_PIN       5
 #define BTNUP_PIN     19
 #define BTNDOWN_PIN   21
 #define BTNSEL_PIN    25
-#define PUZ_UP_PIN    32
-#define PUZ_DOWN_PIN  33
-#define PUZ_LEFT_PIN  34
-#define PUZ_RIGHT_PIN 35
-#define PUZ_SEL_PIN   26
-#define DF_RX_PIN     16
-#define DF_TX_PIN     17
-
+#define FPSerial Serial1
 // ─── CONSTANTES ──────────────────────────────────────────────
+#define NEO_COUNT         24
 #define NAV_COOLDOWN_MS   100
 #define DEBOUNCE_MS       200
 #define SCREEN_WIDTH      320
@@ -46,11 +43,11 @@ typedef enum : uint8_t {
   STATE_WF,
   STATE_BT,
   STATE_ALARMCONF,
-  STATE_ALARM_ACTIVE,
   STATE_SHOW_PATTERN,
   STATE_WAIT_INPUT,
   STATE_SUCCESS,
   STATE_FAIL,
+  STATE_ALARM
 } ProgrammState;
 
 typedef enum : uint8_t {
@@ -61,13 +58,8 @@ typedef enum : uint8_t {
   RENDER_BT_CONECTADO,
   RENDER_BT_SSID,
   RENDER_BT_PASSWORD,
-  RENDER_ALARM_ACTIVE,
-  RENDER_PUZZLE_INIT,
-  RENDER_SHOW_PATTERN,
-  RENDER_HIDE_PATTERN,
-  RENDER_PUZZLE_CURSOR,
-  RENDER_SUCCESS,
-  RENDER_FAIL,
+  RENDER_ALARM_CONF,
+  RENDER_ALARM_ACTIVE
 } RenderCommand;
 
 // ─── ESTRUCTURA GLOBAL ───────────────────────────────────────
@@ -80,17 +72,17 @@ typedef struct {
   int  hora;
   int  minuto;
   int  LastTiempotranscurrido;
-  bool RepCancion;
+  bool alarmaenmin;
   bool BTinit;
-  int  pattern[PATTERN_LENGTH];
-  int  userInput[PATTERN_LENGTH];
-  int  inputCount;
-  int  cursorX;
-  int  cursorY;
-  bool alarmTriggered;
+
+  int alarmaHora   = ALARM_HOUR;
+  int alarmaMinuto = ALARM_MINUTE;
+  bool alarmareconfig;
 } AppData;
 
 // ─── VARIABLES GLOBALES ──────────────────────────────────────
+Adafruit_NeoPixel strip(NEO_COUNT, NEO_PIN, NEO_GRB + NEO_KHZ800);
+volatile bool neoRunning = false;
 volatile AppData gd;
 DFRobotDFPlayerMini myDFPlayer;
 HardwareSerial dfSerial(2);
@@ -111,31 +103,24 @@ void drawTask(void *p);
 void handleMenu();
 void handleWifi();
 void handleBluethoot();
-void handleAlarmActive();
-void handleShowPattern();
-void handlePuzzleInput();
-void handleSuccess();
-void handleFail();
-void generatePattern();
-bool checkPattern();
+
+
 void DrawMenu(int sel);
 void DrawWifi(int etapa);
 void DrawBT(int fase);
-void DrawAlarmActive();
-void drawPuzzleGrid();
-void showPattern();
-void hidePattern();
-void drawCursor(int col, int fila);
-void updatePuzzleCursor();
-void DrawSuccess();
-void DrawFail();
+
 void sendRenderCommand(RenderCommand cmd);
 int  Tiempotranscurrido();
-
+void handleAlarmConf();
+void DrawAlarmConf(int campo, int hh, int mm);
 // ═══════════════════════════════════════════════════════════════
 //  SETUP
 // ═══════════════════════════════════════════════════════════════
 void setup() {
+  
+  Adafruit_NeoPixel strip(NEO_COUNT, NEO_PIN, NEO_GRB + NEO_KHZ800);
+  volatile bool neoRunning = false; 
+  FPSerial.begin(9600, SERIAL_8N1, 16, 17);
   Serial.begin(115200);
   Serial.println("[BOOT] Iniciando sistema...");
 
@@ -143,6 +128,7 @@ void setup() {
   tft.setRotation(1);
 
   // Valores iniciales
+  gd.alarmaenmin         = false;
   gd.currentState           = STATE_MENU;
   gd.menuSelection          = 0;
   gd.wifi                   = false;
@@ -150,15 +136,11 @@ void setup() {
   gd.Conectando             = false;
   gd.BTinit                 = false;
   gd.LastTiempotranscurrido = 0;
-  gd.alarmTriggered         = false;
-  gd.inputCount             = 0;
-  gd.cursorX                = 1;
-  gd.cursorY                = 1;
+  gd.alarmareconfig         = false;
 
   // DFPlayer
-  dfSerial.begin(9600, SERIAL_8N1, DF_RX_PIN, DF_TX_PIN);
-  delay(1000);
-  if (!myDFPlayer.begin(dfSerial)) {
+
+  if (!myDFPlayer.begin(FPSerial)) {
     Serial.println("[DFPlayer] ERROR: No se pudo inicializar.");
   } else {
     Serial.println("[DFPlayer] Inicializado OK.");
@@ -175,15 +157,10 @@ void setup() {
   pinMode(BTNDOWN_PIN, INPUT_PULLUP);
   pinMode(BTNSEL_PIN,  INPUT_PULLUP);
 
-  // Botones puzzle
-  pinMode(PUZ_UP_PIN,    INPUT_PULLUP);
-  pinMode(PUZ_DOWN_PIN,  INPUT_PULLUP);
-  pinMode(PUZ_LEFT_PIN,  INPUT_PULLUP);
-  pinMode(PUZ_RIGHT_PIN, INPUT_PULLUP);
-  pinMode(PUZ_SEL_PIN,   INPUT_PULLUP);
 
-  xTaskCreatePinnedToCore(logicTask, "LogicTask", 8192, NULL, 2, NULL,        1);
+  xTaskCreatePinnedToCore(logicTask, "LogicTask", 8192, NULL, 1, NULL,        1);
   xTaskCreatePinnedToCore(drawTask,  "DrawTask",  8192, NULL, 1, &taskHandle, 0);
+  xTaskCreate(neoPixelTask, "neoPixelTask", 8192,NULL, 2,NULL);
 
   sendRenderCommand(RENDER_MENU);
 }
@@ -222,12 +199,11 @@ void logicTask(void *p) {
       case STATE_MENU:         handleMenu();         break;
       case STATE_WF:           handleWifi();         break;
       case STATE_BT:           handleBluethoot();    break;
-      case STATE_ALARMCONF:                          break;
-      case STATE_ALARM_ACTIVE: handleAlarmActive();  break;
-      case STATE_SHOW_PATTERN: handleShowPattern();  break;
-      case STATE_WAIT_INPUT:   handlePuzzleInput();  break;
-      case STATE_SUCCESS:      handleSuccess();      break;
-      case STATE_FAIL:         handleFail();         break;
+      case STATE_ALARMCONF:{    
+      handleAlarmConf();    
+      break;
+      }
+      case STATE_ALARM:        handleAlarm();         break;
       default: vTaskDelay(pdMS_TO_TICKS(10));        break;
     }
   }
@@ -259,7 +235,9 @@ void drawTask(void *p) {
             sel = gd.menuSelection;
             xSemaphoreGive(stateMutex);
           }
-          if (sel != lastSel || (gd.wifi && (horaN != gd.hora || minutoN != gd.minuto))) {
+          if (sel != lastSel || (gd.wifi && (horaN != gd.hora || minutoN != gd.minuto)) ||  gd.alarmareconfig == true ) {
+            gd.alarmaenmin = false;
+             gd.alarmareconfig = false;
             if (gd.wifi) {
               gd.hora   = horaN;
               gd.minuto = minutoN;
@@ -269,19 +247,29 @@ void drawTask(void *p) {
           }
           break;
         }
-
+        case RENDER_ALARM_CONF: {
+          int c, h, m;
+          // campo: 0=hora, 1=minuto — lo recuperamos del estado global
+          // hora/minuto vienen de gd (usados como buffer de edición)
+          if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+            h = gd.hora;
+            m = gd.minuto;
+            xSemaphoreGive(stateMutex);
+          }
+          // campo se pasa implícitamente: está en handleAlarmConf (static)
+          // Para desacoplarlo limpiamente, usa la misma lógica de render:
+          // el campo 0 muestra HORA en amarillo si alarmaHora != h (editando)
+          // Simplificación: siempre renderizamos con lo que hay en gd
+          c = (gd.alarmaHora == h && gd.alarmaMinuto != m) ? 1 : 0;
+          DrawAlarmConf(c, h, m);
+          break;
+        }
         case RENDER_WIFI_CONECTANDO: DrawWifi(0);          break;
         case RENDER_WIFI_CONECTADO:  DrawWifi(1);          break;
         case RENDER_CONECTANDO_BT:   DrawBT(0);            break;
         case RENDER_BT_SSID:         DrawBT(1);            break;
         case RENDER_BT_PASSWORD:     DrawBT(2);            break;
-        case RENDER_ALARM_ACTIVE:    DrawAlarmActive();    break;
-        case RENDER_PUZZLE_INIT:     drawPuzzleGrid();     break;
-        case RENDER_SHOW_PATTERN:    showPattern();        break;
-        case RENDER_HIDE_PATTERN:    hidePattern();        break;
-        case RENDER_PUZZLE_CURSOR:   updatePuzzleCursor(); break;
-        case RENDER_SUCCESS:         DrawSuccess();        break;
-        case RENDER_FAIL:            DrawFail();           break;
+        case RENDER_ALARM_ACTIVE: DrawAlarmActive();        break;
         default: break;
       }
     }
@@ -298,6 +286,7 @@ void handleMenu() {
   int horaN   = -1;
   int minutoN = -1;
   bool changed = false;
+  bool alarmaconfig = false;
 
   // Actualizar hora cada 20s
   if (Tiempotranscurrido() > 20000) {
@@ -312,25 +301,24 @@ void handleMenu() {
     }
   }
 
+      if(gd.alarmareconfig == true){
+        Serial.println("Se configuro alarma");
+       changed = true;
+
+    }
+
   // Chequear alarma y actualizar hora en gd
   if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    if(gd.hora == gd.alarmaHora && gd.minuto == gd.alarmaMinuto){
+      gd.currentState = STATE_ALARM;
+      
 
+    }
     // ← Guardar hora en gd y marcar changed
     if (horaN != -1 && minutoN -1 && (horaN != gd.hora || minutoN != gd.minuto)) {
-      gd.hora   = horaN;    // ← esto faltaba
-      gd.minuto = minutoN;  // ← esto faltaba
       changed   = true;
     }
 
-    if (gd.wifi && !gd.alarmTriggered &&
-        gd.hora == ALARM_HOUR && gd.minuto == ALARM_MINUTE) {
-      gd.alarmTriggered = true;
-      gd.currentState   = STATE_ALARM_ACTIVE;
-      xSemaphoreGive(stateMutex);
-      startAlarmSound();
-      sendRenderCommand(RENDER_ALARM_ACTIVE);
-      return;
-    }
     xSemaphoreGive(stateMutex);
   }
 
@@ -353,7 +341,11 @@ void handleMenu() {
         Serial.println("abajo");
       } else if (!digitalRead(BTNSEL_PIN)) {
         switch (gd.menuSelection) {
-          case 0: gd.currentState = STATE_ALARMCONF; break;
+          case 0:{ 
+            gd.currentState = STATE_ALARMCONF; 
+            Serial.println("en el menu se eligio alarmconf");
+            break;
+            }
           case 1: gd.currentState = STATE_WF;        break;
           case 2: gd.currentState = STATE_BT;        break;
         }
@@ -368,7 +360,7 @@ void handleMenu() {
 void handleWifi() {
   static bool yaConectado  = false;
   static bool yaIniciado   = false;
-  static int  intentos     = 0;
+  static int  intentos     = 0; 
 
   // ── Ya conectado ──
   if (gd.wifi) {
@@ -585,140 +577,10 @@ void handleBluethoot() {
   vTaskDelay(pdMS_TO_TICKS(50));
 }
 
-// ── Alarma ───────────────────────────────────────────────────
-void handleAlarmActive() {
-  vTaskDelay(pdMS_TO_TICKS(1500));
-  generatePattern();
-  if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    gd.currentState = STATE_SHOW_PATTERN;
-    gd.inputCount   = 0;
-    gd.cursorX      = 1;
-    gd.cursorY      = 1;
-    xSemaphoreGive(stateMutex);
-  }
-  sendRenderCommand(RENDER_PUZZLE_INIT);
-  vTaskDelay(pdMS_TO_TICKS(500));
-  sendRenderCommand(RENDER_SHOW_PATTERN);
-}
-
-void handleShowPattern() {
-  vTaskDelay(pdMS_TO_TICKS(SHOW_PATTERN_MS));
-  sendRenderCommand(RENDER_HIDE_PATTERN);
-  if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    gd.currentState = STATE_WAIT_INPUT;
-    xSemaphoreGive(stateMutex);
-  }
-}
-
-void handleSuccess() {
-  stopAlarmSound();
-  sendRenderCommand(RENDER_SUCCESS);
-  vTaskDelay(pdMS_TO_TICKS(2000));
-  if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    gd.alarmTriggered = false;
-    gd.currentState   = STATE_MENU;
-    xSemaphoreGive(stateMutex);
-  }
-  sendRenderCommand(RENDER_MENU);
-}
-
-void handleFail() {
-  sendRenderCommand(RENDER_FAIL);
-  vTaskDelay(pdMS_TO_TICKS(1500));
-  generatePattern();
-  if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    gd.currentState = STATE_SHOW_PATTERN;
-    gd.inputCount   = 0;
-    gd.cursorX      = 1;
-    gd.cursorY      = 1;
-    xSemaphoreGive(stateMutex);
-  }
-  sendRenderCommand(RENDER_PUZZLE_INIT);
-  vTaskDelay(pdMS_TO_TICKS(400));
-  sendRenderCommand(RENDER_SHOW_PATTERN);
-}
 
 // ═══════════════════════════════════════════════════════════════
 //  PUZZLE
 // ═══════════════════════════════════════════════════════════════
-void generatePattern() {
-  bool usada[9] = {false};
-  if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    for (int i = 0; i < PATTERN_LENGTH; i++) {
-      int celda;
-      do { celda = random(9); } while (usada[celda]);
-      usada[celda]  = true;
-      gd.pattern[i] = celda;
-      Serial.print("[Puzzle] Patron["); Serial.print(i); Serial.print("]="); Serial.println(celda);
-    }
-    gd.inputCount = 0;
-    xSemaphoreGive(stateMutex);
-  }
-}
-
-bool checkPattern() {
-  bool correcto = true;
-  if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    for (int i = 0; i < PATTERN_LENGTH; i++) {
-      if (gd.userInput[i] != gd.pattern[i]) { correcto = false; break; }
-    }
-    xSemaphoreGive(stateMutex);
-  }
-  return correcto;
-}
-
-void handlePuzzleInput() {
-  static bool     locked   = false;
-  static uint32_t lockTime = 0;
-
-  if (locked && (millis() - lockTime > NAV_COOLDOWN_MS))
-    locked = false;
-
-  if (locked) return;
-
-  bool changed = false;
-
-  if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-    if (!digitalRead(PUZ_UP_PIN) && gd.cursorY > 0) {
-      gd.cursorY--; changed = true;
-    } else if (!digitalRead(PUZ_DOWN_PIN) && gd.cursorY < GRID_ROWS - 1) {
-      gd.cursorY++; changed = true;
-    } else if (!digitalRead(PUZ_LEFT_PIN) && gd.cursorX > 0) {
-      gd.cursorX--; changed = true;
-    } else if (!digitalRead(PUZ_RIGHT_PIN) && gd.cursorX < GRID_COLS - 1) {
-      gd.cursorX++; changed = true;
-    } else if (!digitalRead(PUZ_SEL_PIN)) {
-      int celda = gd.cursorY * GRID_COLS + gd.cursorX;
-      gd.userInput[gd.inputCount] = celda;
-      gd.inputCount++;
-      Serial.print("[Puzzle] Celda seleccionada: "); Serial.println(celda);
-
-      if (gd.inputCount >= PATTERN_LENGTH) {
-        xSemaphoreGive(stateMutex);
-        locked = true; lockTime = millis();
-        if (checkPattern()) {
-          if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            gd.currentState = STATE_SUCCESS;
-            xSemaphoreGive(stateMutex);
-          }
-        } else {
-          if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            gd.currentState = STATE_FAIL;
-            xSemaphoreGive(stateMutex);
-          }
-        }
-        return;
-      }
-      changed = true;
-    }
-    xSemaphoreGive(stateMutex);
-  }
-
-  if (changed) {
-    locked = true; lockTime = millis();
-    sendRenderCommand(RENDER_PUZZLE_CURSOR);
-  }
-}
 
 // ═══════════════════════════════════════════════════════════════
 //  FUNCIONES DE DIBUJO
@@ -832,109 +694,8 @@ void DrawBT(int fase) {
   }
 }
 
-void DrawAlarmActive() {
-  tft.fillScreen(TFT_RED);
-  tft.setTextColor(TFT_WHITE);
-  tft.drawString("ALARMA!", 80, 40, 6);
-  tft.drawString("Resuelve el puzzle", 50, 130, 2);
-  tft.drawString("para apagarla",      75, 155, 2);
-}
 
-void drawPuzzleGrid() {
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextColor(TFT_WHITE);
-  tft.drawString("Recuerda el patron!", 20, 5, 2);
-  for (int fila = 0; fila < GRID_ROWS; fila++) {
-    for (int col = 0; col < GRID_COLS; col++) {
-      int x = GRID_OFFSET_X + col * (GRID_CELL_SIZE + 5);
-      int y = GRID_OFFSET_Y + fila * (GRID_CELL_SIZE + 5);
-      tft.fillRoundRect(x, y, GRID_CELL_SIZE, GRID_CELL_SIZE, 8, TFT_DARKGREY);
-      tft.drawRoundRect(x, y, GRID_CELL_SIZE, GRID_CELL_SIZE, 8, TFT_WHITE);
-    }
-  }
-  drawCursor(gd.cursorX, gd.cursorY);
-}
 
-void showPattern() {
-  drawPuzzleGrid();
-  if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-    for (int i = 0; i < PATTERN_LENGTH; i++) {
-      int celda = gd.pattern[i];
-      int col   = celda % GRID_COLS;
-      int fila  = celda / GRID_COLS;
-      int x = GRID_OFFSET_X + col  * (GRID_CELL_SIZE + 5);
-      int y = GRID_OFFSET_Y + fila * (GRID_CELL_SIZE + 5);
-      tft.fillRoundRect(x, y, GRID_CELL_SIZE, GRID_CELL_SIZE, 8, TFT_YELLOW);
-      tft.drawRoundRect(x, y, GRID_CELL_SIZE, GRID_CELL_SIZE, 8, TFT_WHITE);
-      tft.setTextColor(TFT_BLACK);
-      char num[2];
-      sprintf(num, "%d", i + 1);
-      tft.drawString(num, x + 22, y + 20, 4);
-    }
-    xSemaphoreGive(stateMutex);
-  }
-}
-
-void hidePattern() {
-  drawPuzzleGrid();
-  tft.setTextColor(TFT_CYAN);
-  tft.drawString("Tu turno! Selecciona", 15, 5, 2);
-}
-
-void drawCursor(int col, int fila) {
-  int x = GRID_OFFSET_X + col  * (GRID_CELL_SIZE + 5);
-  int y = GRID_OFFSET_Y + fila * (GRID_CELL_SIZE + 5);
-  tft.drawRoundRect(x - 2, y - 2, GRID_CELL_SIZE + 4, GRID_CELL_SIZE + 4, 10, TFT_GREEN);
-  tft.drawRoundRect(x - 3, y - 3, GRID_CELL_SIZE + 6, GRID_CELL_SIZE + 6, 11, TFT_GREEN);
-}
-
-void updatePuzzleCursor() {
-  for (int fila = 0; fila < GRID_ROWS; fila++) {
-    for (int col = 0; col < GRID_COLS; col++) {
-      int x = GRID_OFFSET_X + col  * (GRID_CELL_SIZE + 5);
-      int y = GRID_OFFSET_Y + fila * (GRID_CELL_SIZE + 5);
-      bool seleccionada = false;
-      int celdaIdx = fila * GRID_COLS + col;
-      if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-        for (int k = 0; k < gd.inputCount; k++) {
-          if (gd.userInput[k] == celdaIdx) { seleccionada = true; break; }
-        }
-        xSemaphoreGive(stateMutex);
-      }
-      uint16_t color = seleccionada ? TFT_BLUE : TFT_DARKGREY;
-      tft.fillRoundRect(x, y, GRID_CELL_SIZE, GRID_CELL_SIZE, 8, color);
-      tft.drawRoundRect(x, y, GRID_CELL_SIZE, GRID_CELL_SIZE, 8, TFT_WHITE);
-    }
-  }
-  int cx, cy;
-  if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-    cx = gd.cursorX;
-    cy = gd.cursorY;
-    xSemaphoreGive(stateMutex);
-  }
-  drawCursor(cx, cy);
-  tft.setTextColor(TFT_WHITE);
-  char progreso[20];
-  sprintf(progreso, "%d/%d", gd.inputCount, PATTERN_LENGTH);
-  tft.fillRect(250, 5, 70, 20, TFT_BLACK);
-  tft.drawString(progreso, 255, 7, 2);
-}
-
-void DrawSuccess() {
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextColor(TFT_GREEN);
-  tft.drawString("CORRECTO!", 65, 70, 6);
-  tft.setTextColor(TFT_WHITE);
-  tft.drawString("Alarma apagada", 60, 150, 2);
-}
-
-void DrawFail() {
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextColor(TFT_RED);
-  tft.drawString("INCORRECTO", 55, 70, 4);
-  tft.setTextColor(TFT_WHITE);
-  tft.drawString("Nuevo patron...", 65, 140, 2);
-}
 
 // ═══════════════════════════════════════════════════════════════
 //  UTILIDADES
@@ -945,4 +706,267 @@ void sendRenderCommand(RenderCommand cmd) {
 
 int Tiempotranscurrido() {
   return millis() - gd.LastTiempotranscurrido;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  HANDLER: CONFIGURAR ALARMA
+// ═══════════════════════════════════════════════════════════════
+void handleAlarmConf() {
+
+  // campo 0 = hora, campo 1 = minuto, campo 2 = confirmado
+  static int  campo      = 0;
+  static int  editHora   = 0;
+  static int  editMin    = 0;
+  static bool iniciado   = false;
+  static bool btnLocked  = false;
+  static uint32_t lockTime = 0;
+
+  // Inicializar con valores actuales al entrar
+  if (!iniciado) {
+    iniciado  = true;
+    campo     = 0;
+    editHora  = gd.alarmaHora;
+    editMin   = gd.alarmaMinuto;
+    sendRenderCommand(RENDER_ALARM_CONF);
+    vTaskDelay(pdMS_TO_TICKS(200));
+  }
+
+  // Debounce
+  if (btnLocked && (millis() - lockTime > DEBOUNCE_MS))
+    btnLocked = false;
+  if (btnLocked) { vTaskDelay(pdMS_TO_TICKS(200));}
+
+  bool changed = false;
+
+  if (!digitalRead(BTNUP_PIN)) {
+    btnLocked = true; lockTime = millis();
+    if (campo == 0) { editHora = (editHora + 1) % 24; }
+    else            { editMin  = (editMin  + 1) % 60; }
+    changed = true;
+  }
+  else if (!digitalRead(BTNDOWN_PIN)) {
+    btnLocked = true; lockTime = millis();
+    if (campo == 0) { editHora = (editHora + 23) % 24; }
+    else            { editMin  = (editMin  + 59) % 60; }
+    changed = true;
+  }
+  else if (!digitalRead(BTNSEL_PIN)) {
+    btnLocked = true; lockTime = millis();
+    if (campo < 1) {
+      campo++;
+      Serial.println(campo);          // avanzar al siguiente campo
+      changed = true;
+    } else {
+      Serial.println(campo);  
+      // Confirmar: guardar alarma y volver al menú
+      gd.alarmaHora   = editHora;
+      gd.alarmaMinuto = editMin;
+      Serial.printf("[ALARMA] Configurada para %02d:%02d\n", gd.alarmaHora, gd.alarmaMinuto);
+
+      iniciado = false;   // resetear para la próxima vez
+      if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        Serial.println("Volviendo al menu");
+        vTaskDelay(pdMS_TO_TICKS(200));
+        gd.alarmareconfig = true;
+        gd.currentState = STATE_MENU;
+        xSemaphoreGive(stateMutex);
+      }
+      sendRenderCommand(RENDER_MENU);
+      return;
+    }
+  }
+
+  if (changed) {
+    // Pasar valores al draw via variables temporales (sin tocar gd)
+    // DrawAlarmConf los lee directamente de los statics a través del comando
+    // Usamos una pequeña trampa: los guardamos en gd temporalmente para el render
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+      gd.hora   = editHora;   // reutilizamos gd.hora/minuto como buffer de edición
+      gd.minuto = editMin;
+      xSemaphoreGive(stateMutex);
+    }
+    sendRenderCommand(RENDER_ALARM_CONF);
+  }
+
+  vTaskDelay(pdMS_TO_TICKS(30));
+}
+void DrawAlarmConf(int campo, int hh, int mm) {
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_CYAN);
+  tft.setTextSize(1);
+  tft.drawString("Configurar Alarma", 60, 10, 2);
+  tft.drawFastHLine(20, 32, 280, TFT_CYAN);
+
+  // Hora
+  uint16_t colHora = (campo == 0) ? TFT_YELLOW : TFT_WHITE;
+  tft.setTextColor(colHora);
+  char bufH[3]; sprintf(bufH, "%02d", hh);
+  tft.drawString(bufH, 80, 90, 7);
+
+  // Separador
+  tft.setTextColor(TFT_WHITE);
+  tft.drawString(":", 148, 90, 7);
+
+  // Minuto
+  uint16_t colMin = (campo == 1) ? TFT_YELLOW : TFT_WHITE;
+  tft.setTextColor(colMin);
+  char bufM[3]; sprintf(bufM, "%02d", mm);
+  tft.drawString(bufM, 175, 90, 7);
+
+  // Instrucciones
+  tft.setTextColor(TFT_GREEN);
+  tft.drawString("UP/DOWN: cambiar valor", 20, 170, 2);
+  tft.drawString("SELECT:  siguiente / OK", 20, 192, 2);
+
+  // Indicador de campo activo
+  tft.setTextColor(TFT_YELLOW);
+  const char* labels[] = { "< Ajustando HORA >", "< Ajustando MINUTO >" };
+  tft.drawString(labels[campo], 160 - (strlen(labels[campo]) * 3), 215, 2);
+}
+// ═══════════════════════════════════════════════════════════════
+//  PLACEHOLDERS DE MÚSICA
+// ═══════════════════════════════════════════════════════════════
+void MusicaOn() {
+  // TODO: implementar sonido de alarma
+  return;
+}
+
+void MusicaOff() {
+  // TODO: detener sonido
+  return;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  NEOPIXEL
+// ═══════════════════════════════════════════════════════════════
+void NeopixelOn()  { neoRunning = true; }
+
+void NeopixelOff() {
+  neoRunning = false;
+  strip.clear();
+  strip.show();
+}
+
+// Tarea FreeRTOS dedicada al NeoPixel — anima cuando neoRunning == true
+void neoPixelTask(void *p) {
+  const uint32_t palette[] = {
+    strip.Color(  0, 255, 180),   // cian verdoso
+    strip.Color(  0, 200, 255),   // azul cian
+    strip.Color(  0,  80, 255),   // azul puro
+    strip.Color(  0, 255, 100),   // verde azulado
+    strip.Color( 20, 255, 220),   // turquesa
+    strip.Color(  0, 150, 255),   // azul claro
+    strip.Color(  0, 255,  50),   // verde brillante
+    strip.Color(  0, 100, 200),   // azul medio
+  };
+  const int palSize = 8;
+  uint32_t lastUpdate = 0;
+  int step = 0;
+
+  for (;;) {
+    Serial.println("neopixel task");
+    if (neoRunning) {
+      uint32_t now = millis();
+      if (now - lastUpdate >= 40) {        // ~25 fps = efecto frenético
+        lastUpdate = now;
+        for (int i = 0; i < NEO_COUNT; i++) {
+          // Cada 3 LEDs uno se apaga para dar sensación de parpadeo caótico
+          if ((step + i) % 3 == 0) {
+            strip.setPixelColor(i, 0);
+          } else {
+            int idx = (step + i * 3) % palSize;
+            strip.setPixelColor(i, palette[idx]);
+          }
+        }
+        strip.show();
+        step = (step + 1) % (palSize * 6);
+      }
+    }
+    else{
+      for (int i = 0; i < NEO_COUNT; i++) {
+        strip.setPixelColor(i, strip.Color(255, 0, 0));
+        }
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  HANDLER: ALARMA ACTIVA
+// ═══════════════════════════════════════════════════════════════
+void handleAlarm() {
+  static bool     iniciado        = false;
+  static bool     esperandoSoltar = true;
+  static uint32_t lastBlink       = 0;
+
+  if (!iniciado) {
+    iniciado        = true;
+    esperandoSoltar = true;
+    lastBlink       = millis();
+    MusicaOn();
+    NeopixelOn();
+    sendRenderCommand(RENDER_ALARM_ACTIVE);
+  }
+
+  // Parpadeo azul/verde en pantalla cada 400 ms
+  if (millis() - lastBlink >= 400) {
+    lastBlink = millis();
+    sendRenderCommand(RENDER_ALARM_ACTIVE);
+  }
+
+  // Esperar a que SELECT esté suelto (evita detección instantánea al entrar)
+  if (esperandoSoltar) {
+    if (digitalRead(BTNSEL_PIN)) esperandoSoltar = false;   // HIGH = suelto (PULLUP)
+    vTaskDelay(pdMS_TO_TICKS(20));
+    return;
+  }
+
+  // SELECT presionado → apagar todo y volver al menú
+  if (!digitalRead(BTNSEL_PIN)) {
+    MusicaOff();
+    NeopixelOff();
+    iniciado        = false;
+    esperandoSoltar = true;
+
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      gd.currentState = STATE_MENU;
+      xSemaphoreGive(stateMutex);
+    }
+    sendRenderCommand(RENDER_MENU);
+    vTaskDelay(pdMS_TO_TICKS(300));
+    return;
+  }
+
+  vTaskDelay(pdMS_TO_TICKS(30));
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  DRAW: ALARMA ACTIVA
+// ═══════════════════════════════════════════════════════════════
+void DrawAlarmActive() {
+  static bool toggle = false;
+  toggle = !toggle;
+
+  // Alterna fondo azul oscuro / verde oscuro con cada llamada
+  uint16_t bg  = toggle ? tft.color565(0, 0, 80)   : tft.color565(0, 60, 20);
+  uint16_t fg  = toggle ? tft.color565(0, 220, 255) : tft.color565(0, 255, 100);
+  uint16_t brd = toggle ? tft.color565(0, 100, 255) : tft.color565(0, 255, 80);
+
+  tft.fillScreen(bg);
+  tft.drawRect(4,  4, SCREEN_WIDTH - 8,  SCREEN_HEIGHT - 8,  brd);
+  tft.drawRect(8,  8, SCREEN_WIDTH - 16, SCREEN_HEIGHT - 16, brd);
+
+  tft.setTextColor(fg);
+  tft.drawString("!! ALARMA !!", 160 - (12 * 6), 30, 4);
+  tft.drawFastHLine(20, 75, 280, brd);
+
+  // Ícono tipo "onda de alerta"
+  tft.drawCircle(160, 130, 40, brd);
+  tft.drawCircle(160, 130, 28, fg);
+  tft.fillCircle(160, 130, 14, fg);
+
+  tft.drawFastHLine(20, 175, 280, brd);
+  tft.setTextColor(TFT_WHITE);
+  tft.drawString("PRESIONE SELECT",  160 - (15 * 6), 188, 2);
+  tft.drawString("PARA TERMINARLA", 160 - (15 * 6), 208, 2);
 }
