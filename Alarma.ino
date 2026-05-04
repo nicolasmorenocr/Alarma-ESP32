@@ -338,7 +338,7 @@ void handleMenu() {
     navLockTime = millis();
 
     if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      if (!digitalRead(BTNUP_PIN) && gd.menuSelection < 2) {
+      if (!digitalRead(BTNUP_PIN) && gd.menuSelection < 1) {
         gd.menuSelection++;
         changed = true;
         Serial.println("arriba");
@@ -353,8 +353,7 @@ void handleMenu() {
             Serial.println("en el menu se eligio alarmconf");
             break;
             }
-          case 1: gd.currentState = STATE_WF;        break;
-          case 2: gd.currentState = STATE_BT;        break;
+          case 1: gd.currentState = STATE_BT;        break;
         }
       }
       xSemaphoreGive(stateMutex);
@@ -407,6 +406,7 @@ void handleWifi() {
 
     if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
       gd.currentState = STATE_MENU;
+       gd.alarmareconfig = true;
       xSemaphoreGive(stateMutex);
     }
     sendRenderCommand(RENDER_MENU);
@@ -586,16 +586,17 @@ void handleBluethoot() {
 
 
 // ═══════════════════════════════════════════════════════════════
-//  PUZZLE
-// ═══════════════════════════════════════════════════════════════
-
-// ═══════════════════════════════════════════════════════════════
 //  FUNCIONES DE DIBUJO
 // ═══════════════════════════════════════════════════════════════
 void DrawMenu(int sel) {
   tft.fillScreen(TFT_WHITE);
   tft.setTextColor(TFT_BLUE);
   tft.setTextSize(2);
+  for (int i = 0; i < 4; i++){
+    drawEstrella(300, 20*(3*(i+1)), 15, TFT_YELLOW);
+    drawEstrella(20, 20*(3*(i+1)), 15, TFT_YELLOW);
+  }
+  drawEstrella(39, 62, 28, TFT_YELLOW);
   if (gd.wifi) {
     char buf[10];
     sprintf(buf, "%02d:%02d", gd.hora, gd.minuto);
@@ -603,8 +604,8 @@ void DrawMenu(int sel) {
   } else {
     tft.drawString("--:--", 20, 20, 7);
   }
-  const char *items[3] = { "Poner Alarma", "Activar Wifi", "Activar BlueThoot" };
-  for (int i = 0; i < 3; i++) {
+  const char *items[2] = { "Poner Alarma", "Configurar Hora" };
+  for (int i = 0; i < 2; i++) {
     int iy = 120 + i * 24;
     if (i == sel) {
       tft.fillRect(0, iy, SCREEN_WIDTH, 16, TFT_YELLOW);
@@ -642,13 +643,17 @@ void DrawWifi(int etapa) {
 void DrawBT(int fase) {
   switch (fase) {
     case 0:
-      tft.fillScreen(TFT_BLACK);
+      tft.fillScreen(TFT_WHITE);
       tft.drawLine(160, 60,  160, 130, TFT_BLUE);
       tft.drawLine(160, 60,  185, 85,  TFT_BLUE);
       tft.drawLine(185, 85,  160, 110, TFT_BLUE);
       tft.drawLine(160, 130, 185, 105, TFT_BLUE);
       tft.drawLine(185, 105, 160, 80,  TFT_BLUE);
-      tft.setTextColor(TFT_WHITE);
+      tft.setTextColor(TFT_BLACK);
+          for (int i = 0; i < 4; i++){
+        drawEstrella(300, 20*(3*(i+1)), 15, TFT_YELLOW);
+        drawEstrella(20, 20*(3*(i+1)), 15, TFT_YELLOW);
+      }
       tft.drawString("Esperando conexion", 160 - (18*6), 155, 2);
       tft.drawString("Bluetooth...",       160 - (12*6), 178, 2);
       tft.drawFastHLine(40, 205, 240, TFT_BLUE);
@@ -658,42 +663,37 @@ void DrawBT(int fase) {
       tft.drawString("ALARMADIBAR",   160 - (11*6), 235, 2);
       break;
     case 1:
-      tft.fillScreen(TFT_BLACK);
+      tft.fillScreen(TFT_WHITE);
       tft.setTextColor(TFT_CYAN);
-      tft.drawString("Configurar WiFi",      160 - (15*6),  20, 2);
+      tft.drawString("Configurar WiFi",      150 - (15*6),  10, 2);
       tft.drawFastHLine(20, 42, 280, TFT_CYAN);
-      tft.drawCircle(160, 80, 30, TFT_WHITE);
-      tft.drawCircle(160, 80, 18, TFT_WHITE);
-      tft.fillCircle(160, 80,  5, TFT_WHITE);
-      tft.drawFastHLine(20, 115, 280, TFT_WHITE);
+      tft.drawCircle(160, 80, 30, TFT_BLACK);
+      tft.drawCircle(160, 80, 18, TFT_BLACK);
+      tft.fillCircle(160, 80,  5, TFT_BLACK);
+      tft.drawFastHLine(20, 115, 280, TFT_BLACK);
       tft.setTextColor(TFT_YELLOW);
       tft.drawString("Ingresa el nombre de", 160 - (20*6), 125, 2);
       tft.drawString("la red WiFi a la que", 160 - (20*6), 145, 2);
       tft.drawString("te quieras conectar",  160 - (19*6), 165, 2);
       tft.setTextColor(TFT_RED);
       tft.drawString("Recuerda incluir",      160 - (16*6), 195, 2);
-      tft.drawString("MAYUSCULAS y simbolos", 160 - (21*6), 215, 2);
-      tft.drawFastHLine(20, 235, 280, TFT_CYAN);
+      tft.drawString("MAYUSCULAS y simbolos", 130 - (21*6), 215, 2);
+
       tft.setTextColor(TFT_GREEN);
       tft.drawString("Envia por Bluetooth",  160 - (19*6), 245, 2);
       break;
     case 2:
-      tft.fillScreen(TFT_BLACK);
+      tft.fillScreen(TFT_WHITE);
       tft.setTextColor(TFT_CYAN);
       tft.drawString("Configurar WiFi",      160 - (15*6),  20, 2);
-      tft.drawFastHLine(20, 42, 280, TFT_CYAN);
-      tft.drawRect(140, 65, 40, 30, TFT_WHITE);
-      tft.drawArc(160, 68, 18, 12, 180, 360, TFT_WHITE, TFT_BLACK);
-      tft.fillCircle(160, 80, 3, TFT_YELLOW);
-      tft.drawFastHLine(20, 115, 280, TFT_WHITE);
       tft.setTextColor(TFT_YELLOW);
-      tft.drawString("Ingresa la",           160 - (10*6), 125, 2);
-      tft.drawString("contrasena de la red", 160 - (20*6), 145, 2);
-      tft.drawString("a la que te quieras",  160 - (19*6), 165, 2);
-      tft.drawString("conectar",             160 - ( 8*6), 185, 2);
+      tft.drawString("Ingresa la",           160 - (10*6), 90, 2);
+      tft.drawString("contrasena de la red", 160 - (20*6), 110, 2);
+      tft.drawString("a la que te quieras",  160 - (19*6), 130, 2);
+      tft.drawString("conectar",             160 - ( 8*6), 150, 2);
       tft.setTextColor(TFT_RED);
-      tft.drawString("Recuerda incluir",      160 - (16*6), 205, 2);
-      tft.drawString("MAYUSCULAS y simbolos", 160 - (21*6), 220, 2);
+      tft.drawString("Recuerda incluir",      160 - (16*6), 170, 2);
+      tft.drawString("MAYUSCULAS y simbolos", 160 - (21*6), 190, 2);
       tft.drawFastHLine(20, 235, 280, TFT_CYAN);
       tft.setTextColor(TFT_GREEN);
       tft.drawString("Envia por Bluetooth",  160 - (19*6), 245, 2);
@@ -871,8 +871,9 @@ void neoPixelTask(void *p) {
   int step = 0;
 
   for (;;) {
-    Serial.println("neopixel task");
+   
     if (neoRunning) {
+     Serial.println("neopixel task");
       uint32_t now = millis();
       if (now - lastUpdate >= 40) {        // ~25 fps = efecto frenético
         lastUpdate = now;
@@ -979,4 +980,30 @@ void DrawAlarmActive() {
   tft.setTextColor(TFT_WHITE);
   tft.drawString("PRESIONE SELECT",  160 - (15 * 6), 170, 2);
   tft.drawString("PARA TERMINARLA", 160 - (15 * 6), 200, 2);
+}
+
+void drawEstrella(int cx, int cy, int r, uint16_t color) {
+  // Dibuja una estrella de 5 puntas
+  // cx, cy = centro   r = radio externo
+  int rInt = r / 2;  // radio interno
+
+  float angulo = -90.0 * PI / 180.0;  // empezar arriba
+  float paso   = 2.0 * PI / 5.0;      // 72° entre puntas
+
+  int px[10], py[10];
+
+  for (int i = 0; i < 5; i++) {
+    // Punta exterior
+    px[i * 2]     = cx + r    * cos(angulo + paso * i);
+    py[i * 2]     = cy + r    * sin(angulo + paso * i);
+    // Punta interior
+    px[i * 2 + 1] = cx + rInt * cos(angulo + paso * i + paso / 2);
+    py[i * 2 + 1] = cy + rInt * sin(angulo + paso * i + paso / 2);
+  }
+
+  // Dibujar los 10 segmentos de la estrella
+  for (int i = 0; i < 10; i++) {
+    int siguiente = (i + 1) % 10;
+    tft.drawLine(px[i], py[i], px[siguiente], py[siguiente], color);
+  }
 }
