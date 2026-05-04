@@ -72,12 +72,12 @@ typedef struct {
   int  hora;
   int  minuto;
   int  LastTiempotranscurrido;
-  bool alarmaenmin;
+  bool alarmprevent;
   bool BTinit;
-
   int alarmaHora   = ALARM_HOUR;
   int alarmaMinuto = ALARM_MINUTE;
   bool alarmareconfig;
+  bool horaconfigend;
 } AppData;
 
 // ─── VARIABLES GLOBALES ──────────────────────────────────────
@@ -128,7 +128,6 @@ void setup() {
   tft.setRotation(1);
 
   // Valores iniciales
-  gd.alarmaenmin         = false;
   gd.currentState           = STATE_MENU;
   gd.menuSelection          = 0;
   gd.wifi                   = false;
@@ -137,8 +136,8 @@ void setup() {
   gd.BTinit                 = false;
   gd.LastTiempotranscurrido = 0;
   gd.alarmareconfig         = false;
-
-  // DFPlayer
+  gd.alarmprevent           = false;
+  gd.horaconfigend          = false;
 
   if (!myDFPlayer.begin(FPSerial)) {
     Serial.println("[DFPlayer] ERROR: No se pudo inicializar.");
@@ -235,13 +234,21 @@ void drawTask(void *p) {
             sel = gd.menuSelection;
             xSemaphoreGive(stateMutex);
           }
-          if (sel != lastSel || (gd.wifi && (horaN != gd.hora || minutoN != gd.minuto)) ||  gd.alarmareconfig == true ) {
-            gd.alarmaenmin = false;
-             gd.alarmareconfig = false;
+          if (sel != lastSel
+          || (gd.wifi && (horaN != gd.hora || minutoN != gd.minuto)) 
+          ||  gd.alarmareconfig == true 
+          || gd.horaconfigend ) {
+            if(gd.wifi && (horaN != gd.hora || minutoN != gd.minuto)){
+                gd.alarmprevent = false;
+            }
+              
+              gd.alarmareconfig = false;
+              gd.horaconfigend = false;
             if (gd.wifi) {
               gd.hora   = horaN;
               gd.minuto = minutoN;
             }
+
             DrawMenu(sel);
             lastSel = sel;
           }
@@ -310,9 +317,9 @@ void handleMenu() {
   // Chequear alarma y actualizar hora en gd
   if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
     if(gd.hora == gd.alarmaHora && gd.minuto == gd.alarmaMinuto){
-      gd.currentState = STATE_ALARM;
-      
-
+      if(!gd.alarmprevent){
+        gd.currentState = STATE_ALARM;
+      }
     }
     // ← Guardar hora en gd y marcar changed
     if (horaN != -1 && minutoN -1 && (horaN != gd.hora || minutoN != gd.minuto)) {
@@ -899,6 +906,7 @@ void handleAlarm() {
   static bool     esperandoSoltar = true;
   static uint32_t lastBlink       = 0;
 
+
   if (!iniciado) {
     iniciado        = true;
     esperandoSoltar = true;
@@ -925,9 +933,11 @@ void handleAlarm() {
   if (!digitalRead(BTNSEL_PIN)) {
     MusicaOff();
     NeopixelOff();
+    gd.alarmprevent = true;
     iniciado        = false;
     esperandoSoltar = true;
-
+    gd.alarmareconfig = true;
+    
     if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
       gd.currentState = STATE_MENU;
       xSemaphoreGive(stateMutex);
@@ -957,7 +967,7 @@ void DrawAlarmActive() {
   tft.drawRect(8,  8, SCREEN_WIDTH - 16, SCREEN_HEIGHT - 16, brd);
 
   tft.setTextColor(fg);
-  tft.drawString("!! ALARMA !!", 160 - (12 * 6), 30, 4);
+  tft.drawString("!! ALARMA !!", 120 - (12 * 6), 30, 4);
   tft.drawFastHLine(20, 75, 280, brd);
 
   // Ícono tipo "onda de alerta"
@@ -967,6 +977,6 @@ void DrawAlarmActive() {
 
   tft.drawFastHLine(20, 175, 280, brd);
   tft.setTextColor(TFT_WHITE);
-  tft.drawString("PRESIONE SELECT",  160 - (15 * 6), 188, 2);
-  tft.drawString("PARA TERMINARLA", 160 - (15 * 6), 208, 2);
+  tft.drawString("PRESIONE SELECT",  160 - (15 * 6), 170, 2);
+  tft.drawString("PARA TERMINARLA", 160 - (15 * 6), 200, 2);
 }
